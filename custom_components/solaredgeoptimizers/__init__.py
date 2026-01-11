@@ -53,6 +53,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        # AJT: 11-Jan-2026: Added cleanup of coordinator resources
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
+        # Future: If API gets a close() method, call it here
+        # if coordinator and hasattr(coordinator, 'my_api'):
+        #     await hass.async_add_executor_job(coordinator.my_api.close)
 
     return unload_ok
