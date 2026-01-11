@@ -118,6 +118,6 @@ class MyCoordinator(DataUpdateCoordinator):
                     return None
 
         except Exception as err:
-            _LOGGER.error("Error in updating updater")
-            _LOGGER.error(err)
-            raise UpdateFailed(err)
+            # AJT: 11-Jan-2026: Improved exception logging with full traceback
+            _LOGGER.exception("Error in updating updater: %s", err)
+            raise UpdateFailed(err) from err
