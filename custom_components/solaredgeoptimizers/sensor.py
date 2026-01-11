@@ -1,524 +1,240 @@
-""" My module """
-import time
+"""Example integration using DataUpdateCoordinator."""
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import DeviceInfo
 
-import requests
-import json
 import logging
-import pytz
 
-from requests import Session
-from datetime import datetime, timedelta
-from jsonfinder import jsonfinder
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 
-# AJT: 10-Jan-2025: Added logger setup to replace print statements with proper logging
+from homeassistant.core import callback
+
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+)
+
+from .const import (
+    DOMAIN,
+    SENSOR_TYPE,
+    SENSOR_TYPE_OPT_VOLTAGE,
+    SENSOR_TYPE_CURRENT,
+    SENSOR_TYPE_POWER,
+    SENSOR_TYPE_VOLTAGE,
+    SENSOR_TYPE_ENERGY,
+    SENSOR_TYPE_LASTMEASUREMENT,
+)
+
+# AJT: 10-Jan-2025: Changed import to use coordinator module
+from .coordinator import MyCoordinator
+
+from homeassistant.const import (
+    UnitOfPower,
+    UnitOfElectricPotential,
+    UnitOfElectricCurrent,
+    UnitOfEnergy,
+)
+
+# AJT: 10-Jan-2025: Changed from absolute import to relative import to use local solaredgeoptimizers.py instead of site-packages version
+from .solaredgeoptimizers import (
+    SolarEdgeOptimizerData,
+    SolarlEdgeOptimizer,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
-class solaredgeoptimizers:
-    def __init__(self, siteid, username, password):
-        self.siteid = siteid
-        self.username = username
-        self.password = password
 
-    def check_login(self):
-        url = "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/logical".format(
-            self.siteid
-        )
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Add an solarEdge entry."""
+    # Add the needed sensors to hass
+    coordinator: MyCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-        kwargs = {}
-        kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
-        kwargs["headers"] = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-                             }
-        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
-        with requests.get(url, **kwargs) as r:
-            return r.status_code
+    site = await hass.async_add_executor_job(coordinator.my_api.requestListOfAllPanels)
 
-    def requestLogicalLayout(self):
-        url = "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/logical".format(
-            self.siteid
-        )
+    _LOGGER.info("Found all information for site: %s", site.siteId)
+    _LOGGER.info("Site has %s inverters", len(site.inverters))
+    _LOGGER.info(
+        "Adding all optimizers (%s) found to Home Assistant",
+        site.returnNumberOfOptimizers(),
+    )
 
-        kwargs = {}
-
-        kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
-        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
-        with requests.get(url, **kwargs) as r:
-            return r.text
-
-    def requestListOfAllPanels(self):
-        json_obj = json.loads(self.requestLogicalLayout())
-        return SolarEdgeSite(json_obj)
-
-    def requestSystemData(self, itemId):
-        # AJT: 10-Jan-2025: Fixed endpoint URL - changed from monitoringpublic.solaredge.com/publicSystemData to monitoring.solaredge.com/systemData,
-        # changed isPublic=true to false, added locale parameter, and added v parameter with timestamp
-        url = "https://monitoring.solaredge.com/solaredge-web/p/systemData?reporterId={}&type=panel&activeTab=0&fieldId={}&isPublic=false&locale=en_US&v={}".format(
-            itemId, self.siteid, round(time.time() * 1000)
-        )
-
-        kwargs = {}
-        kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
-        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
-        with requests.get(url, **kwargs) as r:
-            if r.status_code == 200:
-                json_object = self.decodeResult(r.text)
-                try:
-                    # AJT: Handle case where decodeResult returns a list instead of dict - extract first element if list
-                    if isinstance(json_object, list):
-                        if len(json_object) > 0:
-                            json_object = json_object[0]
-                        else:
-                            _LOGGER.warning("Empty list returned for optimizer %s", itemId)
-                            return None
-                    
-                    # AJT: 10-Jan-2025: Ensure we have a dictionary before accessing keys
-                    if not isinstance(json_object, dict):
-                        _LOGGER.error("Unexpected data type returned for optimizer %s: %s", itemId, type(json_object))
-                        _LOGGER.debug("Response data: %s", json_object)
-                        return None
-                    
-                    # AJT: 10-Jan-2025: Changed from direct key access to .get() for safer dictionary access
-                    if json_object.get("lastMeasurementDate") == "":
-                        _LOGGER.debug("Skipping optimizer %s without measurements", itemId)
-                        return None
-                    else:
-                        return SolarEdgeOptimizerData(itemId, json_object)
-                except KeyError as e:
-                    # AJT: 10-Jan-2025: Added specific KeyError handling with better logging
-                    _LOGGER.error("Missing expected key in response for optimizer %s: %s", itemId, e)
-                    _LOGGER.debug("Response data: %s", json_object)
-                    return None
-                except Exception as e:
-                    # AJT: Replaced print() with logging and added more detailed error info
-                    _LOGGER.error("Error while processing data for optimizer %s: %s", itemId, e)
-                    _LOGGER.debug("Response data: %s", json_object)
-                    raise Exception("Error while processing data") from e
-            else:
-                # AJT: 10-Jan-2025: Replaced print() statements with logging
-                _LOGGER.error("Error with sending request. Status code: %s", r.status_code)
-                _LOGGER.error(r.text)
-                raise Exception(f"Problem sending request, status code {r.status_code}: {r.text}")
-
-    def requestAllData(self):
-
-        solarsite = self.requestListOfAllPanels()
-
-        # AJT: 11-Jan-2026: Added error handling for getLifeTimeEnergy() response
-        lifetime_energy_response = self.getLifeTimeEnergy()
-        if lifetime_energy_response.startswith("ERROR001"):
-            _LOGGER.error("Failed to get lifetime energy data: %s", lifetime_energy_response)
-            lifetimeenergy = {}
-        else:
-            try:
-                lifetimeenergy = json.loads(lifetime_energy_response)
-            except json.JSONDecodeError as e:
-                _LOGGER.error("Failed to parse lifetime energy JSON: %s", e)
-                lifetimeenergy = {}
-
-        data = []
-        for inverter in solarsite.inverters:
-            for string in inverter.strings:
-                for optimizer in string.optimizers:
-                    info = self.requestSystemData(optimizer.optimizerId)
-                    if info is not None:
-                        # Life time energy adding - AJT: 11-Jan-2026: Added KeyError handling
-                        optimizer_id_str = str(optimizer.optimizerId)
-                        if optimizer_id_str in lifetimeenergy and "unscaledEnergy" in lifetimeenergy[optimizer_id_str]:
-                            info.lifetime_energy = (float(lifetimeenergy[optimizer_id_str]["unscaledEnergy"])) / 1000
-                        else:
-                            _LOGGER.warning("Lifetime energy data missing for optimizer %s, setting to 0", optimizer.optimizerId)
-                            info.lifetime_energy = 0.0
-
-                        data.append(info)
-
-        return data
-
-    def requestItemHistory(self, itemId, starttime=None, endtime=None, parameter="Power"):
-        """
-        Request measurement history of a panel given a time window defined by start- and endtime
-        :param itemId: itemId of the item (panel, string, inverter)
-        :param starttime: starttime as datetime or unix timestamp in ms, or None for start of today
-        :param endtime: endtime as datetime or unix timestamp in ms, or None for 24 hour after starttime
-        :param parameter: the measurement parameter to return
-            a list of available parameters can be obtained using: https://monitoring.solaredge.com/solaredge-web/p/chartParamsList?fieldId={}reporterId={}&format=form
-        :return: dictionary with datetime (keys), value (values) pairs
-            Note, time resolution of the result depends on the time range spanned by start- and endtime
-        """
-        if starttime is None:
-            now = datetime.now()
-            starttime = datetime(now.year, now.month, now.day)
-        if isinstance(starttime, datetime):
-            starttime = int(starttime.timestamp() * 1000)
-        if endtime is None:
-            endtime = int(starttime + timedelta(days=1).total_seconds() * 1000)
-        if isinstance(endtime, datetime):
-            endtime = int(endtime.timestamp() * 1000)
-
-        url = 'https://monitoring.solaredge.com/solaredge-web/p/chartData?reporterId={}&fieldId={}&reporterType=&startDate={:d}&endDate={:d}&uom=W&parameterName={}'.format(
-            itemId, self.siteid,
-            starttime, endtime, parameter
-        )
-
-        r = self._doRequestWithCooldown("GET", url)
-        if r.startswith("ERROR001"):
-            raise Exception(f"Error while doing request: {r}")
-
-        json_object = self.decodeResult(r)
-        try:
-            # Note: the timestamp provided by SolarEdge is not a pure POSIX timestamp, but in fact contains a timezone offset.
-            return {datetime.utcfromtimestamp(pair['date']/1000).astimezone(pytz.utc): pair['value'] for pair in json_object['dateValuePairs']}
-        except Exception as e:
-            raise Exception("Error while processing data") from e
-
-    def requestPanelHistory(self, itemId, starttime=None, endtime=None, parameter="Power"):
-        assert parameter in ("Power", "Current", "Voltage", "Energy", "PowerBox Voltage")
-        return self.requestItemHistory(itemId, starttime=starttime, endtime=endtime, parameter=parameter)
-
-    def requestStringHistory(self, itemId, starttime=None, endtime=None, parameter="Power"):
-        assert parameter in ("Energy", "Power")
-        return self.requestItemHistory(itemId, starttime=starttime, endtime=endtime, parameter=parameter)
-
-    def requestInverterHistory(self, itemId, starttime=None, endtime=None, parameter="Power"):
-        # https://monitoring.solaredge.com/solaredge-web/p/chartParamsList?fieldId={}reporterId={}&format=form
-        assert parameter in ("AC Energy",
-                             "AC Frequency", "AC Frequency P2", "AC Frequency P3",
-                             "AC Voltage", "AC Voltage P2", "AC Voltage P3",
-                             "AC Current", "AC Current P2", "AC Current P3",
-                             "Power", "DC Voltage", "Purchased back feed AC Energy", "Total Reactive Power", "Power Factor")
-        return self.requestItemHistory(itemId, starttime=starttime, endtime=endtime, parameter=parameter)
-
-    def requestHistoricalData(self, starttime=None, endtime=None, type="optimizer", parameter="Power"):
-        assert type in ("optimizer", "inverter", "string")
-
-        solarsite = self.requestListOfAllPanels()
-
-        data = {}
-        for inverter in solarsite.inverters:
-            if "inverter" in type:
-                info = self.requestInverterHistory(inverter.inverterId, starttime, endtime, parameter)
-                data[inverter] = info
-            for string in inverter.strings:
-                if "string" in type:
-                    info = self.requestStringHistory(string.stringId, starttime, endtime, parameter)
-                    data[string] = info
-                for optimizer in string.optimizers:
-                    if "optimizer" in type:
-                        info = self.requestPanelHistory(optimizer.optimizerId, starttime, endtime, parameter)
-                        data[optimizer] = info
-
-        return data
-
-    def _doRequestWithCooldown(self, method, request_url, data=None, wait_sec=0.1, cooldown_sec=5, n_retries=3):
-        """
-        Same as _doRequest, but waiting before each call, and in between retries in case it fails
-        """
-        e = Exception("Could not perform request within %d retries" % n_retries)
-        for i in range(n_retries):
-            try:
-                time.sleep(wait_sec)
-                res = self._doRequest(method=method, request_url=request_url, data=data)
-                return res
-            except ConnectionError as e:
-                if isinstance(e.args[0], Exception) and len(e.args[0].args) > 1 and \
-                        isinstance(e.args[0].args[1], ConnectionResetError) and e.args[0].args[1].errno == 10054:
-                    time.sleep(cooldown_sec)
-                    continue
-                raise e
-        raise e
-
-    def _doRequest(self, method, request_url, data=None):
-        # AJT: 11-Jan-2026: Fixed file descriptor leak by using context manager to ensure session is always closed
-        with Session() as session:
-            session.head(
-                "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/energy".format(
-                    self.siteid
-                ),
-                headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-                         }
-            )
-
-            url = "https://monitoring.solaredge.com/solaredge-web/p/login"
-
-            session.auth = (self.username, self.password)
-
-            # request a login url the get the correct cookie
-            r1 = session.get(url)
-            # AJT: 11-Jan-2026: Verify login request succeeded
-            if r1.status_code != 200:
-                _LOGGER.warning("Login request returned status %d", r1.status_code)
-
-            # Fix the cookie to get a string.
-            therightcookie = self.MakeStringFromCookie(session.cookies.get_dict())
-            # The csrf-token is needed as a seperate header.
-            thecrsftoken = self.GetThecsrfToken(session.cookies.get_dict())
-            # AJT: Added check for None CSRF token to prevent errors when token is missing
-            if thecrsftoken is None:
-                _LOGGER.warning("CSRF token not found in cookies")
-                thecrsftoken = ""
-
-            # Build up the request.
-            response = session.request(
-                method=method,
-                url=request_url,
-                headers={
-                    "authority": "monitoring.solaredge.com",
-                    "accept": "*/*",
-                    "accept-language": "en-US,en;q=0.9,nl;q=0.8",
-                    "content-type": "application/json",
-                    "cookie": therightcookie,
-                    "origin": "https://monitoring.solaredge.com",
-                    "referer": "https://monitoring.solaredge.com/solaredge-web/p/site/{}/".format(
-                        self.siteid
-                    ),
-                    "sec-ch-ua": '"Google Chrome";v="105", "Not)A;Brand";v="8", "Chromium";v="105"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                    "sec-fetch-dest": "empty",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-site": "same-origin",
-                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-                    "x-csrf-token": thecrsftoken,
-                    "x-kl-ajax-request": "Ajax_Request",
-                    "x-requested-with": "XMLHttpRequest",
-                },
-                data=data
-            )
-
-            if response.status_code == 200:
-                return response.text
-            else:
-                return "ERROR001 - HTTP CODE: {}".format(response.status_code)
-
-    def getLifeTimeEnergy(self):
-        url = "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/energy?timeUnit=ALL".format(
-            self.siteid
-        )
-        return self._doRequest("POST", url)
-
-    def getAlerts(self, only_open=False):
-        # Note: this might require FULL_ACCESS rights in the SE portal, as opposed to DASHBOARD_AND_LAYOUT
-        url = "https://monitoring.solaredge.com/solaredge-apigw/api/rna/v1.0/site/{}/alerts".format(
-            self.siteid
-        )
-        data = None
-        if only_open:
-            data = [{"fieldFilterOperator": "IN",
-                     "fieldName": "status",
-                     "fieldValue": ["OPEN"]}]
-        return self._doRequest("POST", url, data=json.dumps(data))
-
-    def GetThecsrfToken(self, cookies):
-        for cookie in cookies:
-            if cookie == "CSRF-TOKEN":
-                return cookies[cookie]
-        # AJT: 10-Jan-2025: Added explicit return None if CSRF token not found
-        return None
-
-    def MakeStringFromCookie(self, cookies):
-
-        maincookiestring = ""
-        for cookie in cookies:
-            if cookie == "CSRF-TOKEN":
-                maincookiestring = (
-                    maincookiestring + cookie + "=" + cookies[cookie] + ";"
-                )
-            elif cookie == "JSESSIONID":
-                maincookiestring = (
-                    maincookiestring + cookie + "=" + cookies[cookie] + ";"
+    i = 1
+    for inverter in site.inverters:
+        _LOGGER.info("Adding all optimizers from inverter: %s", i)
+        for string in inverter.strings:
+            for optimizer in string.optimizers:
+                _LOGGER.info(
+                    "Added optimizer for panel_id: %s to Home Assistant",
+                    optimizer.displayName,
                 )
 
-        maincookiestring = (
-            maincookiestring
-            # AJT: 10-Jan-2025: Fixed typo "concent" to "consent" in cookie string
-            + "SolarEdge_Locale=nl_NL; SolarEdge_Locale=nl_NL; solaredge_cookie_consent=1;SolarEdge_Field_ID={}".format(
-                self.siteid
-            )
+                # extra informatie ophalen
+                info = await hass.async_add_executor_job(
+                    coordinator.my_api.requestSystemData, optimizer.optimizerId
+                )
+
+                if info is not None:
+                    for sensortype in SENSOR_TYPE:
+                        async_add_entities(
+                            [
+                                SolarEdgeOptimizersSensor(
+                                    coordinator,
+                                    hass,
+                                    entry,
+                                    info,
+                                    sensortype,
+                                    optimizer,
+                                    inverter
+                                )
+                            ],
+                            update_before_add=True,
+                        )
+
+    _LOGGER.info(
+        "Done adding all optimizers. Now adding sensors, this may take some time!"
+    )
+
+
+# class MyEntity(CoordinatorEntity, SensorEntity):
+class SolarEdgeOptimizersSensor(CoordinatorEntity, SensorEntity):
+    """An entity using CoordinatorEntity.
+
+    The CoordinatorEntity class provides:
+      should_poll
+      async_update
+      async_added_to_hass
+      available
+
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        paneel: SolarEdgeOptimizerData,
+        sensortype,
+        optimizer: SolarlEdgeOptimizer,
+        inverter
+    ) -> None:
+        super().__init__(coordinator)
+        self._hass = hass
+        self._entry = entry
+        self._paneelobject = paneel
+        self._optimizerobject = optimizer
+        self._inverter = inverter
+        # AJT: 10-Jan-2025: Fixed typo "paneel_desciption" to "paneel_description" to match corrected attribute name
+        self._paneel = paneel.paneel_description
+        self._attr_unique_id = "{}_{}".format(paneel.serialnumber, sensortype)
+        self._sensor_type = sensortype
+        self._attr_name = "{}_{}".format(self._sensor_type, optimizer.displayName)
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}")},
         )
 
-        return maincookiestring
+        if self._sensor_type is SENSOR_TYPE_VOLTAGE:
+            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+            self._attr_device_class = SensorDeviceClass.VOLTAGE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif self._sensor_type is SENSOR_TYPE_CURRENT:
+            self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+            self._attr_device_class = SensorDeviceClass.CURRENT
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif self._sensor_type is SENSOR_TYPE_OPT_VOLTAGE:
+            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+            self._attr_device_class = SensorDeviceClass.VOLTAGE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif self._sensor_type is SENSOR_TYPE_POWER:
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif self._sensor_type is SENSOR_TYPE_ENERGY:
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        elif self._sensor_type is SENSOR_TYPE_LASTMEASUREMENT:
+            self._attr_device_class = SensorDeviceClass.DATE
+            self._attr_state_class = None
 
-    def decodeResult(self, result):
-        json_result = ""
-        for _, __, obj in jsonfinder(result, json_only=True):
-            json_result = obj
-            break
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {
+                # Serial numbers are unique identifiers within a specific domain
+                (DOMAIN, self._paneelobject.serialnumber)
+            },
+            "name": self._optimizerobject.displayName,
+            "manufacturer": self._paneelobject.manufacturer,
+            "model": self._paneelobject.model,
+            "hw_version": self._paneelobject.serialnumber,
+            "via_device": (DOMAIN, self._inverter.serialNumber),
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+
+        if self.coordinator.data is not None:
+
+            _LOGGER.debug(
+                "Update the sensor %s - %s with the info from the coordinator",
+                self._paneelobject.paneel_id,
+                self._sensor_type,
+            )
+
+            for item in self.coordinator.data:
+                if item.paneel_id == self._paneelobject.paneel_id:
+                    # weird first time after reboot value is None
+                    # if self._attr_native_value is not None:
+                    if self._sensor_type is SENSOR_TYPE_VOLTAGE:
+                        self._attr_native_value = item.voltage
+                        break
+                    elif self._sensor_type is SENSOR_TYPE_CURRENT:
+                        self._attr_native_value = item.current
+                        break
+                    elif self._sensor_type is SENSOR_TYPE_OPT_VOLTAGE:
+                        self._attr_native_value = item.optimizer_voltage
+                        break
+                    elif self._sensor_type is SENSOR_TYPE_POWER:
+                        self._attr_native_value = item.power
+                        break
+                    elif self._sensor_type is SENSOR_TYPE_ENERGY:
+                        # AJT: 10-Jan-2025: Removed redundant else clause that assigned self._attr_native_value = self._attr_native_value
+                        if (
+                            self._attr_native_value is None
+                            or item.lifetime_energy >= self._attr_native_value
+                        ):
+                            self._attr_native_value = item.lifetime_energy
+                        break
+                    elif self._sensor_type is SENSOR_TYPE_LASTMEASUREMENT:
+                        self._attr_native_value = item.lastmeasurement
+                        break
         else:
-            raise ValueError("data not found")
+            # Set the value to zero. (BUT NOT FOR LIFETIME ENERGY)
+            # AJT: 10-Jan-2025: Fixed comparison syntax from "not self._sensor_type is" to "self._sensor_type is not"
+            if (self._sensor_type is not SENSOR_TYPE_ENERGY) and (
+                self._sensor_type is not SENSOR_TYPE_LASTMEASUREMENT
+            ):
+                self._attr_native_value = 0
 
-        return json_result
-
-class SolarEdgeSite:
-    def __init__(self, json_obj):
-        self.siteId = json_obj["siteId"]
-        self.inverters = self.__GetAllInverters(json_obj)
-
-    def __GetAllInverters(self, json_obj):
-
-        inverters = []
-        for i in range(len(json_obj["logicalTree"]["childIds"])):
-
-            # Blijkbaar kan er een powermeter tussen zitten. Checken of dit het geval is
-            # Production Meter -> moeten 1 niveau dieper
-            # Inverter 1 -> dit is 'normaal'
-            if "PRODUCTION METER" not in json_obj["logicalTree"]["children"][i]["data"]["name"].upper():
-                inverters.append(SolarEdgeInverter(json_obj=json_obj, index=i))
-            else:
-                for j in range(len(json_obj["logicalTree"]["children"][i]["childIds"])):
-                    #inverters.append(SolarEdgeInverter(json_obj, i, j, True))
-                    inverters.append(SolarEdgeInverter(json_obj=json_obj, index=i, index2=j, powermeterpresent=True))
-
-        return inverters
-
-    def returnNumberOfOptimizers(self):
-        i = 0
-
-        for inverter in self.inverters:
-            for string in inverter.strings:
-                i = i + len(string.optimizers)
-
-        return i
-
-    def ReturnAllPanelsIds(self):
-
-        panel_ids = []
-
-        for inverter in self.inverters:
-            for string in inverter.strings:
-                for optimizer in string.optimizers:
-                    panel_ids.append(
-                        "{}|{}".format(optimizer.optimizerId, optimizer.serialNumber)
-                    )
-
-        return panel_ids
-
-
-class SolarEdgeInverter:
-
-    def __init__(self, json_obj, index, index2=0, powermeterpresent=False):
-        if powermeterpresent:
-            self.inverterId = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["id"]
-            self.serialNumber = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["serialNumber"]
-            self.name = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["name"]
-            self.displayName = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["displayName"]
-            self.relativeOrder = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["relativeOrder"]
-            self.type = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["type"]
-            self.operationsKey = json_obj["logicalTree"]["children"][index]["children"][index2]["data"]["operationsKey"]
-
-            self.strings = self.__GetStringInformation(json_obj["logicalTree"]["children"][index]["children"][index2]["children"], index2)
-        else:
-            self.inverterId = json_obj["logicalTree"]["children"][index]["data"]["id"]
-            self.serialNumber = json_obj["logicalTree"]["children"][index]["data"]["serialNumber"]
-            self.name = json_obj["logicalTree"]["children"][index]["data"]["name"]
-            self.displayName = json_obj["logicalTree"]["children"][index]["data"]["displayName"]
-            self.relativeOrder = json_obj["logicalTree"]["children"][index]["data"]["relativeOrder"]
-            self.type = json_obj["logicalTree"]["children"][index]["data"]["type"]
-            self.operationsKey = json_obj["logicalTree"]["children"][index]["data"]["operationsKey"]
-
-            self.strings = self.__GetStringInformation(json_obj["logicalTree"]["children"][index]["children"], index)
-
-
-    def __GetStringInformation(self, json_obj, index):
-        strings = []
-
-        for i in range(len(json_obj)):
-            if "STRING" in json_obj[i]["data"]["name"].upper():
-                strings.append(SolarEdgeString(json_obj[i]))
-            else:
-                for j in range(len(json_obj[i]["children"])):
-                    strings.append(SolarEdgeString(json_obj[i]["children"][j]))
-
-        return strings
-
-
-class SolarEdgeString:
-    def __init__(self, json_obj):
-        self.stringId = json_obj["data"]["id"]
-        self.serialNumber = json_obj["data"]["serialNumber"]
-        self.name = json_obj["data"]["name"]
-        self.displayName = json_obj["data"]["displayName"]
-        self.relativeOrder = json_obj["data"]["relativeOrder"]
-        self.type = json_obj["data"]["type"]
-        self.operationsKey = json_obj["data"]["operationsKey"]
-        self.optimizers = self.__GetOptimizers(json_obj)
-
-    def __GetOptimizers(self, json_obj):
-        optimizers = []
-
-        for i in range(len(json_obj["children"])):
-            optimizers.append(SolarlEdgeOptimizer(json_obj["children"][i]))
-
-        return optimizers
-
-
-class SolarlEdgeOptimizer:
-    def __init__(self, json_obj):
-        self.optimizerId = json_obj["data"]["id"]
-        self.serialNumber = json_obj["data"]["serialNumber"]
-        self.name = json_obj["data"]["name"]
-        self.displayName = json_obj["data"]["displayName"]
-        self.relativeOrder = json_obj["data"]["relativeOrder"]
-        self.type = json_obj["data"]["type"]
-        self.operationsKey = json_obj["data"]["operationsKey"]
-
-
-class SolarEdgeOptimizerData:
-    """Data class for SolarEdge optimizer measurements and metadata."""
-
-    def __init__(self, paneelid, json_object):
-
-        # Atributen die we willen zien:
-        self.serialnumber = ""
-        self.paneel_id = ""
-        # AJT: Fixed typo "paneel_desciption" to "paneel_description"
-        self.paneel_description = ""
-        self.lastmeasurement = ""
-        self.model = ""
-        self.manufacturer = ""
-
-        # Waarden
-        self.current = ""
-        self.optimizer_voltage = ""
-        self.power = ""
-        self.voltage = ""
-
-        # Extra info
-        self.lifetime_energy = ""
-
-        if paneelid is not None:
-            self._json_obj = json_object
-
-            # Atributen die we willen zien:
-            self.serialnumber = json_object["serialNumber"]
-            self.paneel_id = paneelid
-            # AJT: 10-Jan-2025: Fixed typo "paneel_desciption" to "paneel_description"
-            self.paneel_description = json_object["description"]
-            rawdate = json_object.get("lastMeasurementDate", "")
-            
-            # AJT: 11-Jan-2026: Fixed fragile date parsing with error handling
+        value = self._attr_native_value
+        if isinstance(value, str) and "," in value:
+            # AJT: 11-Jan-2026: Added error handling for float conversion
             try:
-                # Removing the Timezone information
-                date_parts = rawdate.split(' ')
-                if len(date_parts) >= 6:
-                    new_time = "{} {} {} {} {}".format(
-                        date_parts[0], date_parts[1], date_parts[2],
-                        date_parts[3], date_parts[5]
-                    )
-                    self.lastmeasurement = datetime.strptime(new_time, "%a %b %d %H:%M:%S %Y")
-                else:
-                    # Fallback: try parsing the full string (strip timezone if present)
-                    _LOGGER.warning("Unexpected date format for optimizer %s: %s", paneelid, rawdate)
-                    date_str = rawdate.split('(')[0].strip() if '(' in rawdate else rawdate
-                    self.lastmeasurement = datetime.strptime(date_str, "%a %b %d %H:%M:%S %Y")
-            except (ValueError, IndexError) as e:
-                _LOGGER.error("Failed to parse date '%s' for optimizer %s: %s", rawdate, paneelid, e)
-                # Set to current time as fallback
-                self.lastmeasurement = datetime.now()
+                self._attr_native_value = float(value.replace(",", ""))
+            except ValueError:
+                _LOGGER.warning("Could not convert value '%s' to float for sensor %s", value, self._attr_name)
+                # Keep original value
 
-            self.model = json_object.get("model", "")
-            self.manufacturer = json_object.get("manufacturer", "")
-
-            # Waarden - AJT: 11-Jan-2026: Fixed unsafe dictionary access using .get() with defaults
-            measurements = json_object.get("measurements", {})
-            self.current = measurements.get("Current [A]", 0.0)
-            self.optimizer_voltage = measurements.get("Optimizer Voltage [V]", 0.0)
-            self.power = measurements.get("Power [W]", 0.0)
-            self.voltage = measurements.get("Voltage [V]", 0.0)
+        self.async_write_ha_state()
