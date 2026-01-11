@@ -109,13 +109,15 @@ class MyCoordinator(DataUpdateCoordinator):
                         update = True
                         break
 
+                # AJT: 11-Jan-2026: Always return data to allow lifetime_energy and last_measurement sensors to update
+                # The time check is only used for logging purposes - all sensors need to update
                 if update or self.first_boot:
                     _LOGGER.debug("We enter new data")
                     self.first_boot = False
-                    return data
                 else:
-                    _LOGGER.debug("No new data to enter")
-                    return None
+                    _LOGGER.debug("No new measurements within time window, but returning data for cumulative sensors")
+                
+                return data
 
         except Exception as err:
             # AJT: 11-Jan-2026: Improved exception logging with full traceback
