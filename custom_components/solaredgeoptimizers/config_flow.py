@@ -28,7 +28,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 
 class SolarEdgeWebAuth:
-    """boe"""
+    """Handles authentication with SolarEdge API."""
 
     def __init__(self, siteid: str) -> None:
         """Initialize."""
@@ -72,8 +72,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step."""
-
-        # print("config_flow.py -> async_step_user")
 
         if user_input is None:
             return self.async_show_form(
