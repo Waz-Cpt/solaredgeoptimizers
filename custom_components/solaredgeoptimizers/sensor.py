@@ -230,6 +230,11 @@ class SolarEdgeOptimizersSensor(CoordinatorEntity, SensorEntity):
 
         value = self._attr_native_value
         if isinstance(value, str) and "," in value:
-            self._attr_native_value = float(value.replace(",", ""))
+            # AJT: 11-Jan-2026: Added error handling for float conversion
+            try:
+                self._attr_native_value = float(value.replace(",", ""))
+            except ValueError:
+                _LOGGER.warning("Could not convert value '%s' to float for sensor %s", value, self._attr_name)
+                # Keep original value
 
         self.async_write_ha_state()
