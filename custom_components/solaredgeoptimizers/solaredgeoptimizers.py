@@ -28,9 +28,9 @@ class solaredgeoptimizers:
         kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
         kwargs["headers"] = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
                              }
-        r = requests.get(url, **kwargs)
-
-        return r.status_code
+        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
+        with requests.get(url, **kwargs) as r:
+            return r.status_code
 
     def requestLogicalLayout(self):
         url = "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/logical".format(
@@ -40,9 +40,9 @@ class solaredgeoptimizers:
         kwargs = {}
 
         kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
-        r = requests.get(url, **kwargs)
-
-        return r.text
+        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
+        with requests.get(url, **kwargs) as r:
+            return r.text
 
     def requestListOfAllPanels(self):
         json_obj = json.loads(self.requestLogicalLayout())
@@ -57,52 +57,62 @@ class solaredgeoptimizers:
 
         kwargs = {}
         kwargs["auth"] = requests.auth.HTTPBasicAuth(self.username, self.password)
-        r = requests.get(url, **kwargs)
-
-        if r.status_code == 200:
-            json_object = self.decodeResult(r.text)
-            try:
-                # AJT: Handle case where decodeResult returns a list instead of dict - extract first element if list
-                if isinstance(json_object, list):
-                    if len(json_object) > 0:
-                        json_object = json_object[0]
-                    else:
-                        _LOGGER.warning("Empty list returned for optimizer %s", itemId)
+        # AJT: 11-Jan-2026: Use context manager to ensure response is properly closed
+        with requests.get(url, **kwargs) as r:
+            if r.status_code == 200:
+                json_object = self.decodeResult(r.text)
+                try:
+                    # AJT: Handle case where decodeResult returns a list instead of dict - extract first element if list
+                    if isinstance(json_object, list):
+                        if len(json_object) > 0:
+                            json_object = json_object[0]
+                        else:
+                            _LOGGER.warning("Empty list returned for optimizer %s", itemId)
+                            return None
+                    
+                    # AJT: 10-Jan-2025: Ensure we have a dictionary before accessing keys
+                    if not isinstance(json_object, dict):
+                        _LOGGER.error("Unexpected data type returned for optimizer %s: %s", itemId, type(json_object))
+                        _LOGGER.debug("Response data: %s", json_object)
                         return None
-                
-                # AJT: 10-Jan-2025: Ensure we have a dictionary before accessing keys
-                if not isinstance(json_object, dict):
-                    _LOGGER.error("Unexpected data type returned for optimizer %s: %s", itemId, type(json_object))
+                    
+                    # AJT: 10-Jan-2025: Changed from direct key access to .get() for safer dictionary access
+                    if json_object.get("lastMeasurementDate") == "":
+                        _LOGGER.debug("Skipping optimizer %s without measurements", itemId)
+                        return None
+                    else:
+                        return SolarEdgeOptimizerData(itemId, json_object)
+                except KeyError as e:
+                    # AJT: 10-Jan-2025: Added specific KeyError handling with better logging
+                    _LOGGER.error("Missing expected key in response for optimizer %s: %s", itemId, e)
                     _LOGGER.debug("Response data: %s", json_object)
                     return None
-                
-                # AJT: 10-Jan-2025: Changed from direct key access to .get() for safer dictionary access
-                if json_object.get("lastMeasurementDate") == "":
-                    _LOGGER.debug("Skipping optimizer %s without measurements", itemId)
-                    return None
-                else:
-                    return SolarEdgeOptimizerData(itemId, json_object)
-            except KeyError as e:
-                # AJT: 10-Jan-2025: Added specific KeyError handling with better logging
-                _LOGGER.error("Missing expected key in response for optimizer %s: %s", itemId, e)
-                _LOGGER.debug("Response data: %s", json_object)
-                return None
-            except Exception as e:
-                # AJT: Replaced print() with logging and added more detailed error info
-                _LOGGER.error("Error while processing data for optimizer %s: %s", itemId, e)
-                _LOGGER.debug("Response data: %s", json_object)
-                raise Exception("Error while processing data") from e
-        else:
-            # AJT: 10-Jan-2025: Replaced print() statements with logging
-            _LOGGER.error("Error with sending request. Status code: %s", r.status_code)
-            _LOGGER.error(r.text)
-            raise Exception("Problem sending request, status code %d: %s" % (r.status_code, r.text))
+                except Exception as e:
+                    # AJT: Replaced print() with logging and added more detailed error info
+                    _LOGGER.error("Error while processing data for optimizer %s: %s", itemId, e)
+                    _LOGGER.debug("Response data: %s", json_object)
+                    raise Exception("Error while processing data") from e
+            else:
+                # AJT: 10-Jan-2025: Replaced print() statements with logging
+                _LOGGER.error("Error with sending request. Status code: %s", r.status_code)
+                _LOGGER.error(r.text)
+                raise Exception(f"Problem sending request, status code {r.status_code}: {r.text}")
 
     def requestAllData(self):
 
         solarsite = self.requestListOfAllPanels()
 
-        lifetimeenergy = json.loads(self.getLifeTimeEnergy())
+        # AJT: 11-Jan-2026: Added error handling for getLifeTimeEnergy() response
+        lifetime_energy_response = self.getLifeTimeEnergy()
+        if lifetime_energy_response.startswith("ERROR001"):
+            _LOGGER.error("Failed to get lifetime energy data: %s", lifetime_energy_response)
+            lifetimeenergy = {}
+        else:
+            try:
+                lifetimeenergy = json.loads(lifetime_energy_response)
+            except json.JSONDecodeError as e:
+                _LOGGER.error("Failed to parse lifetime energy JSON: %s", e)
+                lifetimeenergy = {}
 
         data = []
         for inverter in solarsite.inverters:
@@ -110,8 +120,13 @@ class solaredgeoptimizers:
                 for optimizer in string.optimizers:
                     info = self.requestSystemData(optimizer.optimizerId)
                     if info is not None:
-                        # Life time energy adding
-                        info.lifetime_energy = (float(lifetimeenergy[str(optimizer.optimizerId)]["unscaledEnergy"])) / 1000
+                        # Life time energy adding - AJT: 11-Jan-2026: Added KeyError handling
+                        optimizer_id_str = str(optimizer.optimizerId)
+                        if optimizer_id_str in lifetimeenergy and "unscaledEnergy" in lifetimeenergy[optimizer_id_str]:
+                            info.lifetime_energy = (float(lifetimeenergy[optimizer_id_str]["unscaledEnergy"])) / 1000
+                        else:
+                            _LOGGER.warning("Lifetime energy data missing for optimizer %s, setting to 0", optimizer.optimizerId)
+                            info.lifetime_energy = 0.0
 
                         data.append(info)
 
@@ -145,7 +160,7 @@ class solaredgeoptimizers:
 
         r = self._doRequestWithCooldown("GET", url)
         if r.startswith("ERROR001"):
-            raise Exception("Error while doing request: %s" % r)
+            raise Exception(f"Error while doing request: {r}")
 
         json_object = self.decodeResult(r)
         try:
@@ -211,63 +226,67 @@ class solaredgeoptimizers:
         raise e
 
     def _doRequest(self, method, request_url, data=None):
-        session = Session()
-        session.head(
-            "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/energy".format(
-                self.siteid
-            ),
-            headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-                     }
-        )
-
-        url = "https://monitoring.solaredge.com/solaredge-web/p/login"
-
-        session.auth = (self.username, self.password)
-
-        # request a login url the get the correct cookie
-        r1 = session.get(url)
-
-        # Fix the cookie to get a string.
-        therightcookie = self.MakeStringFromCookie(session.cookies.get_dict())
-        # The csrf-token is needed as a seperate header.
-        thecrsftoken = self.GetThecsrfToken(session.cookies.get_dict())
-        # AJT: Added check for None CSRF token to prevent errors when token is missing
-        if thecrsftoken is None:
-            _LOGGER.warning("CSRF token not found in cookies")
-            thecrsftoken = ""
-
-        # Build up the request.
-        response = session.request(
-            method=method,
-            url=request_url,
-            headers={
-                "authority": "monitoring.solaredge.com",
-                "accept": "*/*",
-                "accept-language": "en-US,en;q=0.9,nl;q=0.8",
-                "content-type": "application/json",
-                "cookie": therightcookie,
-                "origin": "https://monitoring.solaredge.com",
-                "referer": "https://monitoring.solaredge.com/solaredge-web/p/site/{}/".format(
+        # AJT: 11-Jan-2026: Fixed file descriptor leak by using context manager to ensure session is always closed
+        with Session() as session:
+            session.head(
+                "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/energy".format(
                     self.siteid
                 ),
-                "sec-ch-ua": '"Google Chrome";v="105", "Not)A;Brand";v="8", "Chromium";v="105"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-origin",
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
-                "x-csrf-token": thecrsftoken,
-                "x-kl-ajax-request": "Ajax_Request",
-                "x-requested-with": "XMLHttpRequest",
-            },
-            data=data
-        )
+                headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
+                         }
+            )
 
-        if response.status_code == 200:
-            return response.text
-        else:
-            return "ERROR001 - HTTP CODE: {}".format(response.status_code)
+            url = "https://monitoring.solaredge.com/solaredge-web/p/login"
+
+            session.auth = (self.username, self.password)
+
+            # request a login url the get the correct cookie
+            r1 = session.get(url)
+            # AJT: 11-Jan-2026: Verify login request succeeded
+            if r1.status_code != 200:
+                _LOGGER.warning("Login request returned status %d", r1.status_code)
+
+            # Fix the cookie to get a string.
+            therightcookie = self.MakeStringFromCookie(session.cookies.get_dict())
+            # The csrf-token is needed as a seperate header.
+            thecrsftoken = self.GetThecsrfToken(session.cookies.get_dict())
+            # AJT: Added check for None CSRF token to prevent errors when token is missing
+            if thecrsftoken is None:
+                _LOGGER.warning("CSRF token not found in cookies")
+                thecrsftoken = ""
+
+            # Build up the request.
+            response = session.request(
+                method=method,
+                url=request_url,
+                headers={
+                    "authority": "monitoring.solaredge.com",
+                    "accept": "*/*",
+                    "accept-language": "en-US,en;q=0.9,nl;q=0.8",
+                    "content-type": "application/json",
+                    "cookie": therightcookie,
+                    "origin": "https://monitoring.solaredge.com",
+                    "referer": "https://monitoring.solaredge.com/solaredge-web/p/site/{}/".format(
+                        self.siteid
+                    ),
+                    "sec-ch-ua": '"Google Chrome";v="105", "Not)A;Brand";v="8", "Chromium";v="105"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-site": "same-origin",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
+                    "x-csrf-token": thecrsftoken,
+                    "x-kl-ajax-request": "Ajax_Request",
+                    "x-requested-with": "XMLHttpRequest",
+                },
+                data=data
+            )
+
+            if response.status_code == 200:
+                return response.text
+            else:
+                return "ERROR001 - HTTP CODE: {}".format(response.status_code)
 
     def getLifeTimeEnergy(self):
         url = "https://monitoring.solaredge.com/solaredge-apigw/api/sites/{}/layout/energy?timeUnit=ALL".format(
@@ -442,7 +461,7 @@ class SolarlEdgeOptimizer:
 
 
 class SolarEdgeOptimizerData:
-    """boe"""
+    """Data class for SolarEdge optimizer measurements and metadata."""
 
     def __init__(self, paneelid, json_object):
 
@@ -472,22 +491,34 @@ class SolarEdgeOptimizerData:
             self.paneel_id = paneelid
             # AJT: 10-Jan-2025: Fixed typo "paneel_desciption" to "paneel_description"
             self.paneel_description = json_object["description"]
-            rawdate = json_object["lastMeasurementDate"]
+            rawdate = json_object.get("lastMeasurementDate", "")
+            
+            # AJT: 11-Jan-2026: Fixed fragile date parsing with error handling
+            try:
+                # Removing the Timezone information
+                date_parts = rawdate.split(' ')
+                if len(date_parts) >= 6:
+                    new_time = "{} {} {} {} {}".format(
+                        date_parts[0], date_parts[1], date_parts[2],
+                        date_parts[3], date_parts[5]
+                    )
+                    self.lastmeasurement = datetime.strptime(new_time, "%a %b %d %H:%M:%S %Y")
+                else:
+                    # Fallback: try parsing the full string (strip timezone if present)
+                    _LOGGER.warning("Unexpected date format for optimizer %s: %s", paneelid, rawdate)
+                    date_str = rawdate.split('(')[0].strip() if '(' in rawdate else rawdate
+                    self.lastmeasurement = datetime.strptime(date_str, "%a %b %d %H:%M:%S %Y")
+            except (ValueError, IndexError) as e:
+                _LOGGER.error("Failed to parse date '%s' for optimizer %s: %s", rawdate, paneelid, e)
+                # Set to current time as fallback
+                self.lastmeasurement = datetime.now()
 
-            # Removing the Timezone information
-            new_time = "{} {} {} {} {}".format(
-                rawdate.split(' ')[0],rawdate.split(' ')[1],rawdate.split(' ')[2],
-                rawdate.split(' ')[3],rawdate.split(' ')[5]
-            )
-            self.lastmeasurement = datetime.strptime(new_time, "%a %b %d %H:%M:%S %Y")
+            self.model = json_object.get("model", "")
+            self.manufacturer = json_object.get("manufacturer", "")
 
-            self.model = json_object["model"]
-            self.manufacturer = json_object["manufacturer"]
-
-            # Waarden
-            self.current = json_object["measurements"]["Current [A]"]
-            self.optimizer_voltage = json_object["measurements"][
-                "Optimizer Voltage [V]"
-            ]
-            self.power = json_object["measurements"]["Power [W]"]
-            self.voltage = json_object["measurements"]["Voltage [V]"]
+            # Waarden - AJT: 11-Jan-2026: Fixed unsafe dictionary access using .get() with defaults
+            measurements = json_object.get("measurements", {})
+            self.current = measurements.get("Current [A]", 0.0)
+            self.optimizer_voltage = measurements.get("Optimizer Voltage [V]", 0.0)
+            self.power = measurements.get("Power [W]", 0.0)
+            self.voltage = measurements.get("Voltage [V]", 0.0)
