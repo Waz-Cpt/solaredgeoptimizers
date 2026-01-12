@@ -4,6 +4,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
 
+from datetime import timezone
+from homeassistant.util import dt as dt_util   # HA helper, tz-aware
+
 import logging
 
 from homeassistant.components.sensor import (
@@ -238,3 +241,4 @@ class SolarEdgeOptimizersSensor(CoordinatorEntity, SensorEntity):
                 # Keep original value
 
         self.async_write_ha_state()
+
